@@ -1,0 +1,7 @@
+{
+  "name": "Atual 12.4 TruckManager iOS - Gestão de Frotas",
+  "description": "Sistema completo para gestão de caminhões, motoristas, fretes, diesel, despesas e manutenção detalhada de pneus e filtros.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
