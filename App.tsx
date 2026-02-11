@@ -57,8 +57,67 @@ const App: React.FC = () => {
       handleAuthChange(session);
     });
 
+    // Load other data from localStorage
+    try {
+      const savedMiscExpenses = localStorage.getItem('truck_misc_expenses');
+      const savedTires = localStorage.getItem('truck_tires');
+      const savedRetiredTires = localStorage.getItem('truck_retired_tires');
+      const savedFilters = localStorage.getItem('truck_filters');
+      const savedStations = localStorage.getItem('truck_stations');
+      const savedCompanies = localStorage.getItem('truck_companies');
+
+      if (savedMiscExpenses) setMiscExpenses(JSON.parse(savedMiscExpenses));
+      if (savedTires) setTires(JSON.parse(savedTires));
+      if (savedRetiredTires) setRetiredTires(JSON.parse(savedRetiredTires));
+      if (savedFilters) setFilters(JSON.parse(savedFilters));
+      if (savedStations) setStations(JSON.parse(savedStations));
+      if (savedCompanies) setCompanies(JSON.parse(savedCompanies));
+    } catch (e) {
+      console.error("Error loading from localStorage", e);
+    }
+
     return () => subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem('truck_misc_expenses', JSON.stringify(miscExpenses));
+    localStorage.setItem('truck_tires', JSON.stringify(tires));
+    localStorage.setItem('truck_retired_tires', JSON.stringify(retiredTires));
+    localStorage.setItem('truck_filters', JSON.stringify(filters));
+    localStorage.setItem('truck_stations', JSON.stringify(stations));
+    localStorage.setItem('truck_companies', JSON.stringify(companies));
+  }, [miscExpenses, tires, retiredTires, filters, stations, companies]);
+
+  const fetchTrips = async (userId: string) => {
+    const { data, error } = await supabase
+      .from('trips')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error("Erro ao carregar viagens:", error);
+      return;
+    }
+
+    if (data) {
+      const mappedTrips: Trip[] = data.map(t => ({
+        id: t.id,
+        driverName: t.driver_name,
+        plate: t.plate,
+        outbound: t.outbound,
+        inbound: t.inbound,
+        diesel: t.diesel,
+        expenses: t.expenses,
+        status: t.status,
+        createdAt: t.created_at,
+        endDate: t.end_date,
+        endKm: t.end_km,
+        miscExpenses: t.misc_expenses
+      }));
+      setTrips(mappedTrips);
+    }
+  };
 
   const handleAuthChange = async (session: any) => {
     if (session) {
@@ -80,9 +139,11 @@ const App: React.FC = () => {
           truckInitialKm: profile.truck_initial_km,
           truckCurrentKm: profile.truck_current_km
         });
+        fetchTrips(session.user.id);
       }
     } else {
       setCurrentUser(null);
+      setTrips([]);
     }
     setLoading(false);
   };
@@ -99,7 +160,9 @@ const App: React.FC = () => {
     setActiveTab('trips');
   };
 
-  const saveTrip = (updatedTrip: Trip, shouldExit: boolean = false) => {
+  const saveTrip = async (updatedTrip: Trip, shouldExit: boolean = false) => {
+    if (!currentUser) return;
+
     let finalTrip = { ...updatedTrip };
 
     if (updatedTrip.status === 'completed') {
@@ -107,17 +170,58 @@ const App: React.FC = () => {
       setMiscExpenses([]);
     }
 
-    setTrips(prev => {
-      const index = prev.findIndex(t => t.id === finalTrip.id);
-      if (index > -1) {
-        const newTrips = [...prev];
-        newTrips[index] = finalTrip;
-        return newTrips;
-      }
-      return [finalTrip, ...prev];
-    });
+    try {
+      const { data: savedData, error: upsertError } = await supabase
+        .from('trips')
+        .upsert({
+          id: finalTrip.id.length > 30 ? finalTrip.id : undefined,
+          user_id: currentUser.id,
+          driver_name: finalTrip.driverName,
+          plate: finalTrip.plate,
+          outbound: finalTrip.outbound,
+          inbound: finalTrip.inbound,
+          diesel: finalTrip.diesel,
+          expenses: finalTrip.expenses,
+          status: finalTrip.status,
+          created_at: finalTrip.createdAt,
+          end_date: finalTrip.endDate,
+          end_km: finalTrip.endKm,
+          misc_expenses: finalTrip.miscExpenses
+        }, { onConflict: 'id' })
+        .select()
+        .single();
 
-    if (currentUser) {
+      if (upsertError) throw upsertError;
+
+      if (savedData) {
+        // Use the returned data to update local state (especially the ID)
+        const tripFromDb: Trip = {
+          id: savedData.id,
+          driverName: savedData.driver_name,
+          plate: savedData.plate,
+          outbound: savedData.outbound,
+          inbound: savedData.inbound,
+          diesel: savedData.diesel,
+          expenses: savedData.expenses,
+          status: savedData.status,
+          createdAt: savedData.created_at,
+          endDate: savedData.end_date,
+          endKm: savedData.end_km,
+          miscExpenses: savedData.misc_expenses
+        };
+
+        setTrips(prev => {
+          const index = prev.findIndex(t => t.id === finalTrip.id || t.id === tripFromDb.id);
+          if (index > -1) {
+            const newTrips = [...prev];
+            newTrips[index] = tripFromDb;
+            return newTrips;
+          }
+          return [tripFromDb, ...prev];
+        });
+      }
+
+      // Update truck KM if needed
       const tripEndKm = Number(updatedTrip.endKm) || 0;
       const tripStartKm = Number(updatedTrip.outbound.startKm) || 0;
       const highestKm = Math.max(tripEndKm, tripStartKm);
@@ -125,8 +229,16 @@ const App: React.FC = () => {
       if (highestKm > (currentUser.truckCurrentKm || 0)) {
         const updatedUser = { ...currentUser, truckCurrentKm: highestKm };
         setCurrentUser(updatedUser);
-        setAllUsers(prev => prev.map(u => u.id === updatedUser.id ? updatedUser : u));
+
+        await supabase
+          .from('profiles')
+          .update({ truck_current_km: highestKm })
+          .eq('id', currentUser.id);
       }
+
+    } catch (err: any) {
+      console.error("Erro ao salvar viagem no Supabase:", err);
+      alert("Erro ao salvar no servidor. Verifique sua conexão.");
     }
 
     if (updatedTrip.status === 'completed' || shouldExit) {
